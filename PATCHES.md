@@ -18,7 +18,7 @@ A future generic seam may be proposed if the external research-operations plugin
 beforeIssueTransition(context) -> allow | deny(reason)
 ```
 
-Any implementation must be domain-neutral and upstreamable. Garmin- or New Edge-specific policy must remain in the external plugin.
+Any implementation must be domain-neutral and upstreamable. Domain-specific policy must remain in external plugins.
 
 Potential consumers include:
 

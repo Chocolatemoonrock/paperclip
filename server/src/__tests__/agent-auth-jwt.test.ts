@@ -1,6 +1,13 @@
 import { createHmac } from "node:crypto";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createLocalAgentJwt, verifyLocalAgentJwt } from "../agent-auth-jwt.js";
+import {
+  createLocalAgentJwt,
+  loadLocalAgentJwtSecretFromPaperclipEnvIfMissing,
+  verifyLocalAgentJwt,
+} from "../agent-auth-jwt.js";
 
 describe("agent local JWT", () => {
   const secretEnv = "PAPERCLIP_AGENT_JWT_SECRET";
@@ -10,6 +17,7 @@ describe("agent local JWT", () => {
   const audienceEnv = "PAPERCLIP_AGENT_JWT_AUDIENCE";
   const disableLegacyFallbackEnv = "PAPERCLIP_AGENT_JWT_DISABLE_LEGACY_FALLBACK";
   const instanceIdEnv = "PAPERCLIP_INSTANCE_ID";
+  const configEnv = "PAPERCLIP_CONFIG";
 
   const originalEnv = {
     secret: process.env[secretEnv],
@@ -19,6 +27,7 @@ describe("agent local JWT", () => {
     audience: process.env[audienceEnv],
     disableLegacyFallback: process.env[disableLegacyFallbackEnv],
     instanceId: process.env[instanceIdEnv],
+    config: process.env[configEnv],
   };
 
   beforeEach(() => {
@@ -29,6 +38,7 @@ describe("agent local JWT", () => {
     delete process.env[audienceEnv];
     delete process.env[disableLegacyFallbackEnv];
     delete process.env[instanceIdEnv];
+    delete process.env[configEnv];
     vi.useFakeTimers();
   });
 
@@ -48,6 +58,8 @@ describe("agent local JWT", () => {
     else process.env[disableLegacyFallbackEnv] = originalEnv.disableLegacyFallback;
     if (originalEnv.instanceId === undefined) delete process.env[instanceIdEnv];
     else process.env[instanceIdEnv] = originalEnv.instanceId;
+    if (originalEnv.config === undefined) delete process.env[configEnv];
+    else process.env[configEnv] = originalEnv.config;
   });
 
   it("creates and verifies a token", () => {
@@ -84,6 +96,35 @@ describe("agent local JWT", () => {
     const token = createLocalAgentJwt("agent-1", "company-1", "claude_local", "run-1");
     expect(token).toBeNull();
     expect(verifyLocalAgentJwt("abc.def.ghi")).toBeNull();
+  });
+
+  it("loads a Paperclip-managed secret created after server startup", () => {
+    const configDir = mkdtempSync(join(tmpdir(), "paperclip-agent-jwt-"));
+    try {
+      const configPath = join(configDir, "config.json");
+      writeFileSync(configPath, "{}\n");
+      writeFileSync(
+        join(configDir, ".env"),
+        "PAPERCLIP_AGENT_JWT_SECRET=late-created-secret\n",
+        { mode: 0o600 },
+      );
+      process.env[configEnv] = configPath;
+      delete process.env[secretEnv];
+      delete process.env[betterAuthSecretEnv];
+
+      expect(loadLocalAgentJwtSecretFromPaperclipEnvIfMissing()).toBe("env_file");
+      expect(process.env[secretEnv]).toBe("late-created-secret");
+      expect(
+        createLocalAgentJwt(
+          "agent-1",
+          "company-1",
+          "codex_local",
+          "run-1",
+        ),
+      ).toEqual(expect.any(String));
+    } finally {
+      rmSync(configDir, { recursive: true, force: true });
+    }
   });
 
   it("falls back to BETTER_AUTH_SECRET when PAPERCLIP_AGENT_JWT_SECRET is absent", () => {

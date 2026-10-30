@@ -47,6 +47,23 @@ describe("OpenCode local skill injection", () => {
     await fs.rm(configHome, { recursive: true, force: true });
   });
 
+  it("pins PWD to the assignment and isolates a restricted runner from the shared service", async () => {
+    const commandPath = path.join(configHome, "fake-restricted-opencode");
+    await fs.writeFile(commandPath, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    vi.stubEnv("PWD", "/wrong/service/directory");
+    runProcessMock.mockReset().mockResolvedValue(probeResult({ stdout: JSON.stringify({ type: "text", sessionID: "restricted", part: { text: "done" } }) }));
+    await execute({
+      runId: "restricted-run",
+      agent: { id: "agent-1", companyId: "company-1", name: "Restricted", adapterType: "opencode_local", adapterConfig: {} },
+      runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+      config: { command: commandPath, cwd: configHome, model: "opencode/deepseek-v4.1-flash-free#high", toolPolicy: {}, env: { OPENCODE_ALLOW_ALL_MODELS: "1" } },
+      context: {}, onLog: async () => {},
+    });
+    const call = runProcessMock.mock.calls.find((args) => args[3][0] === "run");
+    expect(call?.[3]).toContain("--standalone");
+    expect(call?.[4].env?.PWD).toBe(configHome);
+  });
+
   it.each([false, true])("keeps chat policy with a legacy OpenCode prompt (custom=%s)", async (custom) => {
     const commandPath = path.join(configHome, "fake-opencode");
     await fs.writeFile(commandPath, "#!/bin/sh\nexit 0\n", { mode: 0o755 });

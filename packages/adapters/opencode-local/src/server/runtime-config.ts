@@ -89,7 +89,7 @@ function parseConfiguredModelRef(raw: unknown): { provider: string; model: strin
   const trimmed = raw.trim();
   const slash = trimmed.indexOf("/");
   if (slash <= 0 || slash === trimmed.length - 1) return null;
-  return { provider: trimmed.slice(0, slash), model: trimmed.slice(slash + 1) };
+  return { provider: trimmed.slice(0, slash), model: trimmed.slice(slash + 1).split("#")[0] };
 }
 
 async function readJsonObject(filepath: string): Promise<Record<string, unknown>> {
@@ -102,19 +102,99 @@ async function readJsonObject(filepath: string): Promise<Record<string, unknown>
   }
 }
 
+// No shell or arbitrary code is exposed by this profile. Calculations and imports
+// remain operator-run deterministic commands outside the research process.
+async function restrictedOpenCodePolicy(raw: unknown, cwd: unknown): Promise<Record<string, unknown>> {
+  if (raw !== undefined && !isPlainObject(raw)) throw new Error("toolPolicy must be an object");
+  const policy = (raw ?? {}) as Record<string, unknown>;
+  if (Object.keys(policy).some((key) => !["readRoots", "writeRoot", "webOrigins"].includes(key))) {
+    throw new Error("Unknown toolPolicy field");
+  }
+  const directories = async (value: unknown): Promise<string[]> => {
+    if (value === undefined) return [];
+    if (!Array.isArray(value) || value.some((p) => typeof p !== "string" || !path.isAbsolute(p) || /[*?]/.test(p))) {
+      throw new Error("toolPolicy directories must be existing absolute paths without wildcards");
+    }
+    return Promise.all(value.map(async (p: string) => {
+      const real = await fs.realpath(p);
+      if (real === path.parse(real).root || !(await fs.stat(real)).isDirectory()) throw new Error("Unsafe toolPolicy directory");
+      const inspect = async (dir: string): Promise<void> => {
+        for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
+          if (entry.isSymbolicLink()) throw new Error("toolPolicy roots must not contain symbolic links");
+          if (entry.isDirectory()) await inspect(path.join(dir, entry.name));
+        }
+      };
+      await inspect(real);
+      return real;
+    }));
+  };
+  const reads = await directories(policy.readRoots);
+  const writes = await directories(policy.writeRoot === undefined ? undefined : [policy.writeRoot]);
+  const origins = policy.webOrigins ?? [];
+  if (!Array.isArray(origins) || origins.some((s) => {
+    if (typeof s !== "string") return true;
+    try {
+      const u = new URL(s);
+      return u.protocol !== "https:" || u.origin !== s || /[*?]/.test(s) || Boolean(u.username || u.password);
+    } catch { return true; }
+  })) throw new Error("toolPolicy webOrigins must be exact HTTPS origins");
+  const rules: Array<{ action: string; resource: string; effect: string }> = [{ action: "*", resource: "*", effect: "deny" }];
+  const resourceBases: string[] = [];
+  if (typeof cwd === "string" && path.isAbsolute(cwd)) {
+    resourceBases.push(await fs.realpath(cwd).catch(() => path.resolve(cwd)));
+    let ancestor = resourceBases[0];
+    while (ancestor !== path.dirname(ancestor)) {
+      if (await fs.stat(path.join(ancestor, ".git")).then(() => true, () => false)) {
+        resourceBases.push(ancestor);
+        break;
+      }
+      ancestor = path.dirname(ancestor);
+    }
+  }
+  const relative = (dir: string): string[] => {
+    // Never add '../*': that would cover unrelated siblings in a git worktree.
+    return [...new Set(resourceBases.flatMap((base) => {
+      const rel = path.relative(base, dir);
+      return rel && rel !== ".." && !rel.startsWith(`..${path.sep}`) ? [rel, `${rel}/*`] : [];
+    }))];
+  };
+  for (const dir of [...new Set([...reads, ...writes])]) {
+    rules.push({ action: "external_directory", resource: `${dir}/*`, effect: "allow" });
+    rules.push({ action: "read", resource: dir, effect: "allow" });
+    rules.push({ action: "read", resource: `${dir}/*`, effect: "allow" });
+    for (const resource of relative(dir)) rules.push({ action: "read", resource, effect: "allow" });
+  }
+  for (const dir of writes) {
+    rules.push({ action: "edit", resource: dir, effect: "allow" });
+    rules.push({ action: "edit", resource: `${dir}/*`, effect: "allow" });
+    for (const resource of relative(dir)) rules.push({ action: "edit", resource, effect: "allow" });
+  }
+  for (const origin of origins as string[]) rules.push({ action: "webfetch", resource: `${origin}/*`, effect: "allow" });
+  const hardRules = rules.map((r) => ({ action: "tool.use", resource: `${r.action}:${r.resource}`, effect: r.effect }));
+  // Explicit deny-all must be '*', not '*:*', for future permission action shapes.
+  hardRules[0].resource = "*";
+  return {
+    permissions: rules,
+    policies: hardRules,
+    // Also disable inherited MCP/plugin/agent configuration: never copy the host
+    // config directory into a restricted run.
+    agents: { research: { description: "Assignment-scoped research", mode: "primary", permissions: rules } },
+    default_agent: "research",
+    mcp: {},
+  };
+}
+
 export async function prepareOpenCodeRuntimeConfig(input: {
   env: Record<string, string>;
   config: Record<string, unknown>;
   targetIsRemote?: boolean;
 }): Promise<PreparedOpenCodeRuntimeConfig> {
-  const skipPermissions = asBoolean(input.config.dangerouslySkipPermissions, true);
-  if (!skipPermissions) {
-    return {
-      env: input.env,
-      notes: [],
-      cleanup: async () => {},
-    };
+  const skipPermissions = asBoolean(input.config.dangerouslySkipPermissions, false);
+  if (skipPermissions && input.config.toolPolicy !== undefined) {
+    throw new Error("toolPolicy cannot be combined with dangerouslySkipPermissions");
   }
+  const restricted = !skipPermissions;
+  const policy = restricted ? await restrictedOpenCodePolicy(input.config.toolPolicy, input.config.cwd) : null;
 
   // For remote execution targets the host XDG_CONFIG_HOME path is meaningless
   // (and actively harmful — it leaks a macOS-only path into the remote Linux
@@ -122,6 +202,7 @@ export async function prepareOpenCodeRuntimeConfig(input: {
   // box do that via prepareAdapterExecutionTargetRuntime in execute.ts; this
   // host-fs helper is local-only.
   if (input.targetIsRemote) {
+    if (restricted) throw new Error("Restricted OpenCode toolPolicy requires a local execution target");
     return {
       env: input.env,
       notes: [],
@@ -136,12 +217,14 @@ export async function prepareOpenCodeRuntimeConfig(input: {
 
   await fs.mkdir(runtimeConfigDir, { recursive: true });
   try {
-    await fs.cp(sourceConfigDir, runtimeConfigDir, {
-      recursive: true,
-      force: true,
-      errorOnExist: false,
-      dereference: false,
-    });
+    if (!restricted) {
+      await fs.cp(sourceConfigDir, runtimeConfigDir, {
+        recursive: true,
+        force: true,
+        errorOnExist: false,
+        dereference: false,
+      });
+    }
   } catch (err) {
     if ((err as NodeJS.ErrnoException | null)?.code !== "ENOENT") {
       throw err;
@@ -149,9 +232,9 @@ export async function prepareOpenCodeRuntimeConfig(input: {
   }
 
   const existingConfig = await readJsonObject(runtimeConfigPath);
-  const notes = [
-    "Injected runtime OpenCode config with permission=allow for all tools and connections.",
-  ];
+  const notes = [restricted
+    ? "Injected isolated OpenCode config with explicit default-deny tool policy."
+    : "Injected runtime OpenCode config with permission=allow for all tools and connections."];
 
   // Merge gateway/custom provider definitions supplied via PAPERCLIP_OPENCODE_PROVIDERS
   // (a JSON object in OpenCode's `provider` shape). OpenCode resolves a `--model
@@ -204,7 +287,7 @@ export async function prepareOpenCodeRuntimeConfig(input: {
 
   const nextConfig: Record<string, unknown> = {
     ...existingConfig,
-    permission: "allow",
+    ...(policy ?? { permission: "allow" }),
   };
   if (Object.keys(nextProvider).length > 0) {
     nextConfig.provider = nextProvider;

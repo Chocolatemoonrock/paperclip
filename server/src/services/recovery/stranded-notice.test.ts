@@ -67,6 +67,15 @@ describe("stranded recovery notice seeds", () => {
     expect(buildConfigurationIncompleteRecoveryNoticeSeed(null).body).toContain("secret/env bindings");
   });
 
+  it("gives actionable remediation for a missing local-agent JWT secret", () => {
+    const notice = buildConfigurationIncompleteRecoveryNoticeSeed({
+      reason: "agent_jwt_secret_missing",
+    });
+    expect(notice.title).toBe("Local agent authentication needs attention");
+    expect(notice.body).toContain("paperclip doctor --repair");
+    expect(notice.body).toContain("without a restart");
+  });
+
   it("distinguishes todo dispatch from in_progress continuation copy", () => {
     expect(buildImmediateExecutionPathRecoveryNoticeSeed({ status: "todo" }).body).toContain("retried dispatch");
     expect(buildImmediateExecutionPathRecoveryNoticeSeed({ status: "in_progress" }).body).toContain(

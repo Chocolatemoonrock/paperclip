@@ -1,6 +1,9 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import { normalizeAgentApiKeyScope, type AgentApiKeyScope } from "@paperclipai/shared";
+import { parse as parseEnvFileContents } from "dotenv";
 import { resolvePaperclipInstanceId } from "./home-paths.js";
+import { resolvePaperclipEnvPath } from "./paths.js";
 
 interface JwtHeader {
   alg: string;
@@ -23,6 +26,39 @@ export interface LocalAgentJwtClaims {
 }
 
 const JWT_ALGORITHM = "HS256";
+
+export type LocalAgentJwtSecretSource = "environment" | "env_file" | "missing";
+
+/**
+ * Make a Paperclip-managed JWT secret written after server startup available
+ * to subsequent local-agent runs without requiring an operator restart.
+ *
+ * Explicit process environment always wins. We only read Paperclip's own env
+ * file when neither supported process-level secret exists, and we pin the
+ * first discovered value into this process so an in-flight server never
+ * rotates signing keys underneath already-issued run tokens.
+ */
+export function loadLocalAgentJwtSecretFromPaperclipEnvIfMissing(): LocalAgentJwtSecretSource {
+  if (
+    process.env.PAPERCLIP_AGENT_JWT_SECRET?.trim() ||
+    process.env.BETTER_AUTH_SECRET?.trim()
+  ) {
+    return "environment";
+  }
+
+  const envFilePath = resolvePaperclipEnvPath();
+  if (!existsSync(envFilePath)) return "missing";
+
+  try {
+    const parsed = parseEnvFileContents(readFileSync(envFilePath, "utf8"));
+    const secret = parsed.PAPERCLIP_AGENT_JWT_SECRET?.trim();
+    if (!secret) return "missing";
+    process.env.PAPERCLIP_AGENT_JWT_SECRET = secret;
+    return "env_file";
+  } catch {
+    return "missing";
+  }
+}
 
 function parseNumber(value: string | undefined, fallback: number) {
   const parsed = Number(value);

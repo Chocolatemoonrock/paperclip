@@ -182,6 +182,14 @@ describe("openCode models", () => {
     expect(spy.mock.calls[2]?.[2]).toEqual(["models"]);
   });
 
+  it("validates a V2 effort suffix against the base catalog ID", async () => {
+    vi.spyOn(serverUtils, "runChildProcess").mockResolvedValueOnce({
+      exitCode: 0, signal: null, timedOut: false,
+      stdout: "opencode/deepseek-v4.1-flash-free\n", stderr: "", pid: 1, startedAt: new Date().toISOString(),
+    });
+    await expect(ensureOpenCodeModelConfiguredAndAvailable({ model: "opencode/deepseek-v4.1-flash-free#high" })).resolves.toContainEqual({ id: "opencode/deepseek-v4.1-flash-free", label: "opencode/deepseek-v4.1-flash-free" });
+  });
+
   it("still rejects when a refreshed non-empty catalog omits the configured model", async () => {
     const spy = vi
       .spyOn(serverUtils, "runChildProcess")

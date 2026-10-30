@@ -113,6 +113,16 @@ export function sandboxProviderPluginRemedy(pluginStatus: string): string {
 export function buildConfigurationIncompleteRecoveryNoticeSeed(
   configurationIncomplete?: Record<string, unknown> | null,
 ): StrandedRecoveryNoticeSeed {
+  if (readNonEmptyStringField(configurationIncomplete, "reason") === "agent_jwt_secret_missing") {
+    return {
+      title: "Local agent authentication needs attention",
+      body:
+        "Paperclip stopped before launching the agent because it could not mint the run-scoped API credential required for task updates and delegation. " +
+        "Run `paperclip doctor --repair`, then retry the task; the server will load the repaired secret without a restart.",
+      nextAction: "Repair the Paperclip agent JWT secret, then continue the task.",
+      tone: "danger",
+    };
+  }
   if (readNonEmptyStringField(configurationIncomplete, "reason") === "ai_connection_unavailable") {
     return {
       title: "AI connection needs attention",

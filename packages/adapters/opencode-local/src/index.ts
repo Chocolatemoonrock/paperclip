@@ -94,7 +94,8 @@ Core fields:
 - instructionsFilePath (string, optional): absolute path to a markdown instructions file prepended to the run prompt
 - model (string, required): OpenCode model id in provider/model format (for example anthropic/claude-sonnet-4-5)
 - variant (string, optional): provider-specific reasoning/profile variant passed as --variant (for example minimal|low|medium|high|xhigh|max)
-- dangerouslySkipPermissions (boolean, optional): inject a runtime OpenCode config with \`permission=allow\` for all tools and connections; defaults to true for unattended Paperclip runs
+- dangerouslySkipPermissions (boolean, optional): inject a runtime OpenCode config with \`permission=allow\` for all tools and connections; defaults to false; true is an explicit unsafe opt-in
+- toolPolicy (object, optional): assignment-scoped readRoots (existing absolute directories), writeRoot (one existing output directory), webOrigins (exact HTTPS origins). With permissions bypass disabled, omitted grants deny all tools. Shell, delegation, Code Mode and unlisted connected tools remain denied. Restricted runs use a standalone local runner and do not inherit host plugins or agents.
 - promptTemplate (string, optional): run prompt template
 - command (string, optional): defaults to "opencode"
 - extraArgs (string[], optional): additional CLI args

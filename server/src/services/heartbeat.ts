@@ -304,7 +304,10 @@ import type {
   AdapterSessionCodec,
   UsageSummary,
 } from "../adapters/index.js";
-import { createLocalAgentJwt } from "../agent-auth-jwt.js";
+import {
+  createLocalAgentJwt,
+  loadLocalAgentJwtSecretFromPaperclipEnvIfMissing,
+} from "../agent-auth-jwt.js";
 import { createRuntimeToolsToken } from "../runtime-tools-token.js";
 import {
   parseObject,
@@ -24508,31 +24511,35 @@ export function heartbeatService(
           issueRef?.workMode === "skill_test"
             ? { kind: "skill_test" as const, issueId: issueRef.id }
             : { kind: "standard" as const };
-        const authToken =
+        const requiresLocalAgentJwt =
           nativeRuntimeResolution.kind === "legacy" &&
-          adapter.supportsLocalAgentJwt
-            ? createLocalAgentJwt(
-                agent.id,
-                agent.companyId,
-                agent.adapterType,
-                run.id,
-                run.responsibleUserId,
-                localAgentJwtScope,
-              )
-            : null;
-        if (
-          nativeRuntimeResolution.kind === "legacy" &&
-          adapter.supportsLocalAgentJwt &&
-          !authToken
-        ) {
-          logger.warn(
+          adapter.supportsLocalAgentJwt;
+        if (requiresLocalAgentJwt) {
+          loadLocalAgentJwtSecretFromPaperclipEnvIfMissing();
+        }
+        const authToken = requiresLocalAgentJwt
+          ? createLocalAgentJwt(
+              agent.id,
+              agent.companyId,
+              agent.adapterType,
+              run.id,
+              run.responsibleUserId,
+              localAgentJwtScope,
+            )
+          : null;
+        if (requiresLocalAgentJwt && !authToken) {
+          throw new ConfigurationIncompleteFailure(
+            "configuration incomplete: local agent authentication is unavailable because PAPERCLIP_AGENT_JWT_SECRET is missing; run `paperclip doctor --repair`, then retry the task",
             {
-              companyId: agent.companyId,
-              agentId: agent.id,
-              runId: run.id,
-              adapterType: agent.adapterType,
+              configurationIncomplete: {
+                reason: "agent_jwt_secret_missing",
+                companyId: agent.companyId,
+                agentId: agent.id,
+                adapterType: agent.adapterType,
+                actionUrl: "/company/settings/instance",
+                fingerprint: `agent-jwt-secret:${agent.companyId}`,
+              },
             },
-            "local agent jwt secret missing or invalid; running without injected PAPERCLIP_API_KEY",
           );
         }
         let adapterFinalizeOutcome: "succeeded" | "failed" | null = null;

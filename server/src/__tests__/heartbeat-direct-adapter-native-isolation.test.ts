@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   afterAll,
   afterEach,
@@ -196,6 +198,106 @@ describeEmbeddedPostgres("direct adapter native-runner isolation", () => {
       expect(nativeRows.every((rows) => rows.length === 0)).toBe(true);
     },
   );
+
+  it("fails before local-adapter dispatch when a run JWT cannot be minted", async () => {
+    const previousAgentJwtSecret = process.env.PAPERCLIP_AGENT_JWT_SECRET;
+    const previousBetterAuthSecret = process.env.BETTER_AUTH_SECRET;
+    const previousConfigPath = process.env.PAPERCLIP_CONFIG;
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+
+    unregisterServerAdapter("codex_local");
+    registerServerAdapter({
+      type: "codex_local",
+      supportsLocalAgentJwt: true,
+      execute,
+      testEnvironment: async () => ({
+        adapterType: "codex_local",
+        status: "pass",
+        checks: [],
+        testedAt: new Date(0).toISOString(),
+      }),
+    });
+    delete process.env.PAPERCLIP_AGENT_JWT_SECRET;
+    delete process.env.BETTER_AUTH_SECRET;
+    process.env.PAPERCLIP_CONFIG = join(
+      tmpdir(),
+      `paperclip-missing-agent-jwt-${randomUUID()}`,
+      "config.json",
+    );
+
+    try {
+      await db.insert(companies).values({
+        id: companyId,
+        name: "Missing local agent auth",
+        issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+        requireBoardApprovalForNewAgents: false,
+        defaultResponsibleUserId: "responsible-user",
+      });
+      await db.insert(agents).values({
+        id: agentId,
+        companyId,
+        name: "Codex without run auth",
+        role: "engineer",
+        status: "idle",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      });
+
+      const queued = await heartbeat.invoke(agentId, "on_demand", {}, "manual");
+      expect(queued).not.toBeNull();
+      const finished = await waitForRunToFinish(heartbeat, queued!.id);
+
+      expect(execute).not.toHaveBeenCalled();
+      expect(finished).toMatchObject({
+        status: "failed",
+        errorCode: "configuration_incomplete",
+        resultJson: {
+          configurationIncomplete: {
+            reason: "agent_jwt_secret_missing",
+            agentId,
+            companyId,
+            adapterType: "codex_local",
+          },
+          executionRecovery: {
+            kind: "bootstrap",
+            providerWorkStarted: false,
+          },
+        },
+      });
+      expect(finished?.error).toContain("paperclip doctor --repair");
+    } finally {
+      unregisterServerAdapter("codex_local");
+      registerServerAdapter({
+        type: "codex_local",
+        supportsLocalAgentJwt: false,
+        execute,
+        testEnvironment: async () => ({
+          adapterType: "codex_local",
+          status: "pass",
+          checks: [],
+          testedAt: new Date(0).toISOString(),
+        }),
+      });
+      if (previousAgentJwtSecret === undefined) {
+        delete process.env.PAPERCLIP_AGENT_JWT_SECRET;
+      } else {
+        process.env.PAPERCLIP_AGENT_JWT_SECRET = previousAgentJwtSecret;
+      }
+      if (previousBetterAuthSecret === undefined) {
+        delete process.env.BETTER_AUTH_SECRET;
+      } else {
+        process.env.BETTER_AUTH_SECRET = previousBetterAuthSecret;
+      }
+      if (previousConfigPath === undefined) {
+        delete process.env.PAPERCLIP_CONFIG;
+      } else {
+        process.env.PAPERCLIP_CONFIG = previousConfigPath;
+      }
+    }
+  });
 
   it("retains an unsolicited provider cancellation through finalization", async () => {
     const companyId = randomUUID(), agentId = randomUUID();

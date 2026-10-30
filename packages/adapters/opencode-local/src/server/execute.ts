@@ -162,7 +162,7 @@ export async function ensureRemoteOpenCodeModelConfiguredAndAvailable(input: {
     return;
   }
 
-  if (!models.some((entry) => entry.id === model)) {
+  if (!models.some((entry) => entry.id === model.split("#")[0])) {
     const sample = models.slice(0, 12).map((entry) => entry.id).join(", ");
     throw new Error(
       `Configured OpenCode model is unavailable on the remote execution target: ${model}. Available models: ${sample}${models.length > 12 ? ", ..." : ""}`,
@@ -259,9 +259,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const cwd = effectiveWorkspaceCwd || configuredCwd || process.cwd();
   let effectiveExecutionCwd = adapterExecutionTargetRemoteCwd(executionTarget, cwd);
   await ensureAbsoluteDirectory(cwd, { createIfMissing: true });
+  if (config.toolPolicy !== undefined && path.resolve(cwd) !== path.resolve(configuredCwd)) {
+    throw new Error("Restricted OpenCode execution must use its explicitly configured assignment directory");
+  }
   const openCodeSkillEntries = await readPaperclipRuntimeSkillEntries(config, __moduleDir);
   const desiredOpenCodeSkillNames = resolveLegacyPaperclipDesiredSkillNames(config, openCodeSkillEntries);
-  if (!executionTargetIsRemote) {
+  if (!executionTargetIsRemote && config.toolPolicy === undefined) {
     await ensureOpenCodeSkillsInjected(
       onLog,
       openCodeSkillEntries,
@@ -325,10 +328,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   // selection is already handled via the --model CLI flag.  Set after the
   // envConfig loop so user overrides cannot disable this guard.
   env.OPENCODE_DISABLE_PROJECT_CONFIG = "true";
+  // OpenCode uses PWD when selecting its Location. A stale service PWD can
+  // silently select the host project instead of the assignment directory.
+  env.PWD = cwd;
   if (authToken) {
     env.PAPERCLIP_API_KEY = authToken;
   }
-  const preparedRuntimeConfig = await prepareOpenCodeRuntimeConfig({ env, config });
+  const preparedRuntimeConfig = await prepareOpenCodeRuntimeConfig({ env, config, targetIsRemote: executionTargetIsRemote });
   const localRuntimeConfigHome =
     preparedRuntimeConfig.notes.length > 0 ? preparedRuntimeConfig.env.XDG_CONFIG_HOME : "";
   try {
@@ -615,6 +621,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     );
     const buildArgs = (resumeSessionId: string | null) => {
       const args = ["run", "--format", "json"];
+      // A shared background server may have loaded a different global policy.
+      if (config.toolPolicy !== undefined) args.push("--standalone");
       if (printLogs) args.push("--print-logs");
       if (resumeSessionId) args.push("--session", resumeSessionId);
       if (model) args.push("--model", model);
